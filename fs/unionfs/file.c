@@ -208,7 +208,7 @@ int unionfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 		goto out;
 	unionfs_check_file(file);
 
-	err = generic_file_fsync(file, start, end, datasync);
+	err = __generic_file_fsync(file, start, end, datasync);
 	if (err)
 		goto out;
 
