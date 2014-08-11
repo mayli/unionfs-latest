@@ -168,6 +168,91 @@ out:
 	return err;
 }
 
+ssize_t
+unionfs_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	int err = -EINVAL;
+	struct file *file = iocb->ki_filp, *lower_file = NULL;
+	struct dentry *dentry = file->f_path.dentry;
+	struct dentry *parent;
+
+	unionfs_read_lock(dentry->d_sb, UNIONFS_SMUTEX_PARENT);
+	parent = unionfs_lock_parent(dentry, UNIONFS_DMUTEX_PARENT);
+	unionfs_lock_dentry(dentry, UNIONFS_DMUTEX_CHILD);
+
+	err = unionfs_file_revalidate(file, parent, true);
+	if (unlikely(err))
+		goto out;
+
+	lower_file = unionfs_lower_file(file);
+	if (!lower_file->f_op->read_iter)
+		goto out;
+
+	get_file(lower_file);
+	iocb->ki_filp = lower_file;
+	err = lower_file->f_op->read_iter(iocb, iter);
+	iocb->ki_filp = file;
+	fput(lower_file);
+
+	/* update our inode atime upon a successful lower read */
+	/* XXX: need to update upper inode atime when AIO completes */
+	if (err >= 0) {
+		fsstack_copy_attr_atime(dentry->d_inode,
+					file_inode(lower_file));
+		unionfs_check_file(file);
+	}
+
+out:
+	unionfs_unlock_dentry(dentry);
+	unionfs_unlock_parent(dentry, parent);
+	unionfs_read_unlock(dentry->d_sb);
+	return err;
+}
+
+ssize_t
+unionfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	int err = -EINVAL;
+	struct file *file = iocb->ki_filp, *lower_file = NULL;
+	struct dentry *dentry = file->f_path.dentry;
+	struct dentry *parent;
+
+	unionfs_read_lock(dentry->d_sb, UNIONFS_SMUTEX_PARENT);
+	parent = unionfs_lock_parent(dentry, UNIONFS_DMUTEX_PARENT);
+	unionfs_lock_dentry(dentry, UNIONFS_DMUTEX_CHILD);
+
+	err = unionfs_file_revalidate(file, parent, true);
+	if (unlikely(err))
+		goto out;
+
+	lower_file = unionfs_lower_file(file);
+	if (!lower_file->f_op->write_iter)
+		goto out;
+
+	get_file(lower_file);
+	iocb->ki_filp = lower_file;
+	err = lower_file->f_op->write_iter(iocb, iter);
+	iocb->ki_filp = file;
+	fput(lower_file);
+
+	/* update our inode times+sizes upon a successful lower write */
+	/* XXX: need to update upper inode times/sizes when AIO completes */
+	if (err >= 0) {
+		fsstack_copy_inode_size(dentry->d_inode,
+					file_inode(lower_file));
+		fsstack_copy_attr_times(dentry->d_inode,
+					file_inode(lower_file));
+		UNIONFS_F(file)->wrote_to_file = true; /* for delayed copyup */
+		unionfs_check_file(file);
+	}
+
+out:
+	unionfs_unlock_dentry(dentry);
+	unionfs_unlock_parent(dentry, parent);
+	unionfs_read_unlock(dentry->d_sb);
+	return err;
+}
+
 static int unionfs_file_readdir(struct file *file, struct dir_context *ctx)
 {
 	return -ENOTDIR;
@@ -455,6 +540,8 @@ struct file_operations unionfs_main_fops = {
 	.write		= unionfs_write,
 	.aio_read	= unionfs_aio_read,
 	.aio_write	= unionfs_aio_write,
+	.read_iter	= unionfs_read_iter,
+	.write_iter	= unionfs_write_iter,
 	.iterate	= unionfs_file_readdir,
 	.unlocked_ioctl	= unionfs_ioctl,
 #ifdef CONFIG_COMPAT
